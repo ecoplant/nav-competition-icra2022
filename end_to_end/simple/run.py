@@ -4,11 +4,12 @@ import os
 import time
 import timeit
 import multiprocessing
-from multiprocessing import shared_memory
+from multiprocessing import shared_memory, Lock
 from multiprocessing.sharedctypes import Value
 import copy
 
 import torch
+from torch.nn import functional as F
 import numpy as np
 
 from actor import *
@@ -30,33 +31,42 @@ logging.basicConfig(
     level=0,
 )
 
-# create a buffer of torch tensors
-def create_buffer(config):
-    buffer_size = config["training_config"]["buffer_size"]
-    obs_shape = np.array([config["env_config"]["stack_frame"], config["env_config"]["obs_dim"]])
-    act_shape = np.array([2,])
+class ReplayBuffer():
+    def __init__(self, config, device):
+        self.max_size = config['training_config']['buffer_size']
+        self.obs_shape = np.array([config["env_config"]["stack_frame"], config["env_config"]["obs_dim"]])
+        self.act_shape = np.array([2,])
 
-    buffers = dict(
-        state_mem = shared_memory.SharedMemory(
-        create=True, size=np.dtype(np.float32).itemsize*np.prod(obs_shape)*buffer_size, name="state_memory")
-    action_mem = shared_memory.SharedMemory(
-        create=True, size=np.dtype(np.float32).itemsize*np.prod(act_shape)*buffer_size, name="action_memory")
-    next_state_mem = shared_memory.SharedMemory(
-        create=True, size=np.dtype(np.float32).itemsize*np.prod(obs_shape)*buffer_size, name="next_state_memory")
-    reward_mem = shared_memory.SharedMemory(
-        create=True, size=np.dtype(np.float32).itemsize*buffer_size, name="reward_memory")
-    done_mem = shared_memory.SharedMemory(
-        create=True, size=np.dtype(np.bool).itemsize*buffer_size, name="done_memory")
-    )
+        self.batch_size = config['training_config']['training_args']['batch_size']
 
-    ptr = Value('i', 0)
+        self.buffers = dict(
+        state = shared_memory.SharedMemory(
+            create=True, size=np.dtype(np.float32).itemsize*np.prod(obs_shape)*buffer_size, name="state_memory")
+        action = shared_memory.SharedMemory(
+            create=True, size=np.dtype(np.float32).itemsize*np.prod(act_shape)*buffer_size, name="action_memory")
+        next_state = shared_memory.SharedMemory(
+            create=True, size=np.dtype(np.float32).itemsize*np.prod(obs_shape)*buffer_size, name="next_state_memory")
+        reward = shared_memory.SharedMemory(
+            create=True, size=np.dtype(np.float32).itemsize*buffer_size, name="reward_memory")
+        done = shared_memory.SharedMemory(
+            create=True, size=np.dtype(np.bool).itemsize*buffer_size, name="done_memory")
+        )
 
-    return buffers, ptr
+        self.ptr = Value('i', 0)
+        self.size = Value('i',0)
 
+    def sample():
+        index = np.random.randint(0, self.size, size = batch_size)
+        return (
+                torch.FloatTensor(self.buffers['state'][ind]).to(self.device),
+                torch.FloatTensor(self.buffers['action'][ind]).to(self.device),
+                torch.FloatTensor(self.buffers['next_state'][ind]).to(self.device),
+                torch.FloatTensor(self.buffers['reward'][ind]).to(self.device),
+                torch.FloatTensor(self.buffers['done'][ind]).to(self.device)
+                )
 
 
 def train(flags, config):
-
     use_cuda = config["training_config"]["use_cuda"]
 
     if use_cuda and torch.cuda.is_available():
@@ -66,12 +76,23 @@ def train(flags, config):
         logging.info("Not using CUDA.")
         device = torch.device("cpu")
 
-    buffers, ptr = create_buffer(config)
+    gamma = config['training_config']['gamma']
+    tau = config['training_config']['tau']
+    action_low = [config['env_config']['min_v'], config['env_config']['min_w']]
+    action_high = [config['env_config']['max_v'], config['env_config']['max_w']]
+
+    action_scale = torch.tensor(
+            (action_high - action_low) / 2.0, device=self.device)
+    action_bias = torch.tensor(
+        (action_high + action_low) / 2.0, device=self.device)
+
+
+    replay_buffer = ReplayBuffer(config, device)
 
     actor = Actor().to(device)
-    actor_delay = copy.deepcopy(actor)
+    actor_target = copy.deepcopy(actor)
     critic = Critic().to(device)
-    critic_delay = copy.deepcopy(critic)
+    critic_target = copy.deepcopy(critic)
     actor.share_memory()
 
     actor_processes = []
@@ -83,76 +104,68 @@ def train(flags, config):
             args=(
                 config,
                 i,
-                buffers,
-                ptr,
+                replay_buffer.buffers,
+                replay_buffer.ptr,
+                replay_buffer.size,
                 actor
             ),
         )
         actor_process.start()
         actor_processes.append(actor_process)
 
-    optimizer = torch.optim.RMSprop(
-        learner_model.parameters(),
-        lr=flags.learning_rate,
-        momentum=flags.momentum,
-        eps=flags.epsilon,
-        alpha=flags.alpha,
+    actor_optim = torch.optim.Adam(
+        actor.parameters(),
+        lr=config['training_config']['actor_lr']
     )
 
-    def lr_lambda(epoch):
-        return 1 - min(epoch * T * B, flags.total_steps) / flags.total_steps
+    critic_optim = torch.optim.Adam(
+        critic.parameters(),
+        lr=config['training_config']['critic_lr']
+    )
 
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-    logger = logging.getLogger("logfile")
-    stat_keys = [
-        "total_loss",
-        "mean_episode_return",
-        "pg_loss",
-        "baseline_loss",
-        "entropy_loss",
-    ]
-    logger.info("# Step\t%s", "\t".join(stat_keys))
 
     step, stats = 0, {}
+    max_step = config['training_config']['training_args']['learner_steps']
+    actor_optim_period = \
+        config['training_config']['training_args']['actor_optim_period']
+    log_interval = config['training_config']['log_intervals']
 
-    def batch_and_learn(i, lock=threading.Lock()):
-        """Thread target for the learning process."""
-        nonlocal step, stats
-        timings = prof.Timings()
-        while step < flags.total_steps:
-            timings.reset()
-            batch, agent_state = get_batch(
-                flags,
-                free_queue,
-                full_queue,
-                buffers,
-                initial_agent_state_buffers,
-                timings,
-            )
-            stats = learn(
-                flags, model, learner_model, batch, agent_state, optimizer, scheduler
-            )
-            timings.time("learn")
-            with lock:
-                to_log = dict(step=step)
-                to_log.update({k: stats[k] for k in stat_keys})
-                plogger.log(to_log)
-                step += T * B
+    while step < max_step:
+        state, action, next_state, reward, done = replay_buffer.sample()
 
-        if i == 0:
-            logging.info("Batch and learn: %s", timings.summary())
+        with torch.no_grad():
+            argmax_action = actor_target(next_state)
+            target_q1, target_q2 = critic_target(next_state, argmax_action)
+            target_q = torch.min(target_q1, target_q2)
+            target_q = reward + (1.0-done) * gamma * target_q
+        
+        action /= action_scale
+        action += action_bias
+        q1, q2 = critic(state, action)
 
-    for m in range(flags.num_buffers):
-        free_queue.put(m)
+        critic_loss = F.mse_loss(q1, target_q) + F.mse_loss(q2, target_q)
+        critic_optim.zero_grad()
+        critic_loss.backward()
+        critic_optim.step()
 
-    threads = []
-    for i in range(flags.num_learner_threads):
-        thread = threading.Thread(
-            target=batch_and_learn, name="batch-and-learn-%d" % i, args=(i,)
-        )
-        thread.start()
-        threads.append(thread)
+        if step % actor_optim_period == 0:
+            actor_loss = -critic.q1(state, actor(state)).mean()
+            actor_optim.zero_grad()
+            actor_loss.backward()
+            actor_optim.step()
+
+            for param, target_param in zip(critic.parameters(), critic_target.parameters()):
+                target_param.data.copy_(
+                    tau * param.data + (1 - tau) * target_param.data)
+                
+            for param, target_param in zip(actor.parameters(), actor_target.parameters()):
+                target_param.data.copy_(
+                    tau * param.data + (1 - tau) * target_param.data)
+        
+        if step % log_interval == 0:
+            #todo : make a logging function
+
+
 
     def checkpoint():
         if flags.disable_checkpoint:

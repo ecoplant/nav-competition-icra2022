@@ -57,6 +57,7 @@ class Actor(nn.Module):
             head_layers.append(nn.Linear(flatten_dim, flatten_dim, dropout=dropout))
             head_layers.append(nn.ReLU())
         head_layers.append(nn.Linear(flatten_dim, action_dim))
+        head_layers.append(nn.Tanh())
         self.head = nn.Sequential(*head_layers)
 
     
@@ -139,10 +140,6 @@ def act(
     central_actor
 ):
 
-    def write(path):
-        
-
-
     try:
         logging.info("Actor %i started.", actor_index)
         training_config = config["training_config"]
@@ -161,7 +158,7 @@ def act(
         episode_return = 0
         episode_length = 0
 
-        while step < training_config['training_args']['max_step']:
+        while step < training_config['training_args']['actor_steps']:
             act = select_action(obs)
             obs_new, rew, done, info = env.step(act)
             obs = obs_new
