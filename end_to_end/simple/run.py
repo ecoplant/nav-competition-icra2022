@@ -1,19 +1,21 @@
 import argparse
 import logging
 import os
+from os.path import abspath, dirname
 import time
+import datetime
 import timeit
 import multiprocessing
-from multiprocessing import shared_memory, Lock
-from multiprocessing.sharedctypes import Value
+from multiprocessing import shared_memory
 import copy
+import yaml
 
 import torch
 from torch.nn import functional as F
 import numpy as np
 
 from actor import *
-from learner import learn
+from buffer import ReplayBuffer
 
 parser = argparse.ArgumentParser(description="PyTorch Scalable Agent")
 
@@ -22,51 +24,12 @@ parser.add_argument("--mode", default="train",
                     help="Training or test mode.")
 parser.add_argument("--xpid", default=None,
                     help="Experiment id (default: None).")
-
-
-logging.basicConfig(
-    format=(
-        "[%(levelname)s:%(process)d %(module)s:%(lineno)d %(asctime)s] " "%(message)s"
-    ),
-    level=0,
-)
-
-class ReplayBuffer():
-    def __init__(self, config, device):
-        self.max_size = config['training_config']['buffer_size']
-        self.obs_shape = np.array([config["env_config"]["stack_frame"], config["env_config"]["obs_dim"]])
-        self.act_shape = np.array([2,])
-
-        self.batch_size = config['training_config']['training_args']['batch_size']
-
-        self.buffers = dict(
-        state = shared_memory.SharedMemory(
-            create=True, size=np.dtype(np.float32).itemsize*np.prod(obs_shape)*buffer_size, name="state_memory")
-        action = shared_memory.SharedMemory(
-            create=True, size=np.dtype(np.float32).itemsize*np.prod(act_shape)*buffer_size, name="action_memory")
-        next_state = shared_memory.SharedMemory(
-            create=True, size=np.dtype(np.float32).itemsize*np.prod(obs_shape)*buffer_size, name="next_state_memory")
-        reward = shared_memory.SharedMemory(
-            create=True, size=np.dtype(np.float32).itemsize*buffer_size, name="reward_memory")
-        done = shared_memory.SharedMemory(
-            create=True, size=np.dtype(np.bool).itemsize*buffer_size, name="done_memory")
-        )
-
-        self.ptr = Value('i', 0)
-        self.size = Value('i',0)
-
-    def sample():
-        index = np.random.randint(0, self.size, size = batch_size)
-        return (
-                torch.FloatTensor(self.buffers['state'][ind]).to(self.device),
-                torch.FloatTensor(self.buffers['action'][ind]).to(self.device),
-                torch.FloatTensor(self.buffers['next_state'][ind]).to(self.device),
-                torch.FloatTensor(self.buffers['reward'][ind]).to(self.device),
-                torch.FloatTensor(self.buffers['done'][ind]).to(self.device)
-                )
+parser.add_argument("--log", action='store_true',
+                    help="enable logging")
 
 
 def train(flags, config):
+    #load necessary configs
     use_cuda = config["training_config"]["use_cuda"]
 
     if use_cuda and torch.cuda.is_available():
@@ -82,12 +45,57 @@ def train(flags, config):
     action_high = [config['env_config']['max_v'], config['env_config']['max_w']]
 
     action_scale = torch.tensor(
-            (action_high - action_low) / 2.0, device=self.device)
+            (action_high - action_low) / 2.0, device=device)
     action_bias = torch.tensor(
-        (action_high + action_low) / 2.0, device=self.device)
+        (action_high + action_low) / 2.0, device=device)
 
+    buffer_size = config['training_config']['buffer_size']
+    obs_shape = np.array([config["env_config"]["stack_frame"], config["env_config"]["obs_dim"]])
+    act_shape = np.array([2,])
 
-    replay_buffer = ReplayBuffer(config, device)
+    #set paths for logging and checkpoint
+    base_path = dirname(dirname(abspath(__file__)))
+    suffix = datetime.datetime.now().strftime("%y%m%d_%H%M%S")
+
+    log_path = config['training_config']['log_path']
+    log_path = os.path.join(base_path, log_path)
+    if not os.path.exists(log_path):
+        os.mkdir(log_path)
+    log_path = os.path.join(log_path, suffix)
+
+    checkpoint_path = config['training_config']['checkpoint_path']
+    checkpoint_path = os.path.join(base_path, checkpoint_path)
+    if not os.path.exists(checkpoint_path):
+        os.mkdir(checkpoint_path)
+
+    #set a logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(levelname)s %(process)d %(asctime)s %(message)s')
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    file_handler = logging.FileHandler(log_path)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler, file_handler)
+    logger.info(f'Logging to {log_path}')
+
+    #set a buffer, models and processes
+    manager = multiprocessing.Manager()
+    buffer_memory = manager.dict(
+        state = shared_memory.SharedMemory(
+            create=True, size=np.dtype(np.float32).itemsize*np.prod(obs_shape)*buffer_size, name="state_memory"),
+        action = shared_memory.SharedMemory(
+            create=True, size=np.dtype(np.float32).itemsize*np.prod(act_shape)*buffer_size, name="action_memory"),
+        next_state = shared_memory.SharedMemory(
+            create=True, size=np.dtype(np.float32).itemsize*np.prod(obs_shape)*buffer_size, name="next_state_memory"),
+        reward = shared_memory.SharedMemory(
+            create=True, size=np.dtype(np.float32).itemsize*buffer_size, name="reward_memory"),
+        done = shared_memory.SharedMemory(
+            create=True, size=np.dtype(np.bool8).itemsize*buffer_size, name="done_memory")
+        )
+    ptr = manager.Value('i', 0)
+    size = manager.Value('i', 0)
+    buffer = ReplayBuffer(buffer_memory, ptr, size, config, device)
 
     actor = Actor().to(device)
     actor_target = copy.deepcopy(actor)
@@ -104,11 +112,12 @@ def train(flags, config):
             args=(
                 config,
                 i,
-                replay_buffer.buffers,
-                replay_buffer.ptr,
-                replay_buffer.size,
-                actor
-            ),
+                buffer_memory,
+                ptr,
+                size,
+                actor,
+                device
+            )
         )
         actor_process.start()
         actor_processes.append(actor_process)
@@ -123,15 +132,17 @@ def train(flags, config):
         lr=config['training_config']['critic_lr']
     )
 
+    #start training
+    iter, stats = 0, {}
+    max_iter = config['training_config']['max_iter']
+    actor_optim_interval = \
+        config['training_config']['actor_optim_interval']
+    log_interval = config['training_config']['log_interval']
+    checkpoint_interval = config['training_config']['checkpoint_interval']
+    do_validate = config['training_config']['validate']
 
-    step, stats = 0, {}
-    max_step = config['training_config']['training_args']['learner_steps']
-    actor_optim_period = \
-        config['training_config']['training_args']['actor_optim_period']
-    log_interval = config['training_config']['log_intervals']
-
-    while step < max_step:
-        state, action, next_state, reward, done = replay_buffer.sample()
+    while iter < max_iter:
+        state, action, next_state, reward, done = buffer.sample()
 
         with torch.no_grad():
             argmax_action = actor_target(next_state)
@@ -148,7 +159,7 @@ def train(flags, config):
         critic_loss.backward()
         critic_optim.step()
 
-        if step % actor_optim_period == 0:
+        if iter % actor_optim_interval == 0:
             actor_loss = -critic.q1(state, actor(state)).mean()
             actor_optim.zero_grad()
             actor_loss.backward()
@@ -162,100 +173,92 @@ def train(flags, config):
                 target_param.data.copy_(
                     tau * param.data + (1 - tau) * target_param.data)
         
-        if step % log_interval == 0:
-            #todo : make a logging function
-
-
-
+        if iter % log_interval == 0:
+            if do_validate:
+                validate(actor, config, logger, iter)
+            else:
+                logger.info('%i iterations')
+        
+        if iter % checkpoint_interval == 0:
+            checkpoint()
+        
+    
     def checkpoint():
-        if flags.disable_checkpoint:
-            return
-        logging.info("Saving checkpoint to %s", checkpointpath)
+        nonlocal checkpoint_path
+        nonlocal actor, critic
+        logging.info("Saving checkpoint to %s", checkpoint_path)
         torch.save(
             {
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict(),
-                "flags": vars(flags),
+                "actor_state_dict": actor.state_dict,
+                "critic_state_dict": critic.state_dict
             },
-            checkpointpath,
+            checkpoint_path
         )
 
-    timer = timeit.default_timer
-    try:
-        last_checkpoint_time = timer()
-        while step < flags.total_steps:
-            start_step = step
-            start_time = timer()
-            time.sleep(5)
+def validate(actor, config, logger, iter, num_episodes=10):
+    env = create_env(config)
+    actor.eval()
 
-            if timer() - last_checkpoint_time > 10 * 60:  # Save every 10 min.
-                checkpoint()
-                last_checkpoint_time = timer()
+    obs = env.reset()
+    episode_return = 0
+    episode_length = 0
+    returns = []
 
-            sps = (step - start_step) / (timer() - start_time)
-            if stats.get("episode_returns", None):
-                mean_return = (
-                    "Return per episode: %.1f. " % stats["mean_episode_return"]
-                )
-            else:
-                mean_return = ""
-            total_loss = stats.get("total_loss", float("inf"))
-            logging.info(
-                "Steps %i @ %.1f SPS. Loss %f. %sStats:\n%s",
-                step,
-                sps,
-                total_loss,
-                mean_return,
-                pprint.pformat(stats),
+    logger.info('Start validation at iteration %d', iter)
+    while len(returns) < num_episodes:
+        action = actor(obs)
+        obs_new, rew, done, info = env.step(action)
+        episode_return += rew
+        episode_length += 1
+        if done:
+            returns.append(episode_return)
+            logger.info(
+                "Episode ended after %i steps. Return: %.1f",
+                episode_length,
+                episode_return,
             )
-    except KeyboardInterrupt:
-        return 
-    else:
-        for thread in threads:
-            thread.join()
-        logging.info("Learning finished after %d steps.", step)
-    finally:
-        for _ in range(flags.num_actors):
-            free_queue.put(None)
-        for actor in actor_processes:
-            actor.join(timeout=1)
+            episode_return = 0
+            episode_length = 0
+        else:
+            obs = obs_new
+    env.close()
+    logger.info(
+        "Average returns over %i steps: %.1f", num_episodes, sum(returns) / len(returns)
+    )
 
-    checkpoint()
-    plogger.close()
-
-
-def test(flags, config, num_episodes: int = 10):
+def test(flags, config, num_episodes=10):
     if flags.xpid is None:
-        checkpointpath = "./latest/model.tar"
+        checkpoint_path = "./latest/model.tar"
     else:
-        checkpointpath = os.path.expandvars(
-            os.path.expanduser("%s/%s/%s" % (flags.savedir, flags.xpid, "model.tar"))
-        )
+        pass
 
-    gym_env = create_env(flags)
-    env = environment.Environment(gym_env)
-    model = Net(gym_env.observation_space.shape, gym_env.action_space.n, flags.use_lstm)
+    env = create_env(config)
+    model = Actor()
     model.eval()
-    checkpoint = torch.load(checkpointpath, map_location="cpu")
-    model.load_state_dict(checkpoint["model_state_dict"])
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    model.load_state_dict(checkpoint["actor_state_dict"])
 
-    observation = env.initial()
+    obs = env.reset()
+    episode_return = 0
+    episode_length = 0
     returns = []
 
     while len(returns) < num_episodes:
-        if flags.mode == "test_render":
-            env.gym_env.render()
-        agent_outputs = model(observation)
-        policy_outputs, _ = agent_outputs
-        observation = env.step(policy_outputs["action"])
-        if observation["done"].item():
-            returns.append(observation["episode_return"].item())
+        action = model(obs)
+        obs_new, rew, done, info = env.step(action)
+        episode_return += rew
+        episode_length += 1
+        if done:
+            returns.append(episode_return)
             logging.info(
                 "Episode ended after %d steps. Return: %.1f",
-                observation["episode_step"].item(),
-                observation["episode_return"].item(),
+                episode_length,
+                episode_return,
             )
+            episode_return = 0
+            episode_length = 0
+        else:
+            obs = obs_new
     env.close()
     logging.info(
         "Average returns over %i steps: %.1f", num_episodes, sum(returns) / len(returns)
@@ -263,7 +266,7 @@ def test(flags, config, num_episodes: int = 10):
 
 
 def main(flags):
-    config_path = os.path('../data/config.yaml')
+    config_path = os.path('../data/new_config.yaml')
     with open(config_path, 'r') as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
 

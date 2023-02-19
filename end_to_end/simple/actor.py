@@ -4,6 +4,7 @@ import torch.nn as nn
 import gym
 
 import logging
+import traceback
 import sys
 import os
 from os.path import dirname, abspath
@@ -12,6 +13,7 @@ import copy
 sys.path.append(dirname(dirname(abspath(__file__))))
 
 from envs.wrappers import StackFrame
+from buffer import ReplayBuffer
 
 
 class Actor(nn.Module):
@@ -33,38 +35,43 @@ class Actor(nn.Module):
         super().__init__()
 
         conv_layers = []
-        conv_layers.append(nn.Conv1d(in_channels=history_length+2,
+        conv_layers.append(nn.Conv1d(in_channels=history_length,
                                 out_channels=feature_dim/8,
                                 kernel_size=3, stride=2, padding=1))
         conv_layers.append(nn.ReLU())
-        conv_layers.append(nn.Conv1d(in_channels=feature_dim/8+2,
+        conv_layers.append(nn.Conv1d(in_channels=feature_dim/8,
                                 out_channels=feature_dim/4,
                                 kernel_size=3, stride=2, padding=1))
         conv_layers.append(nn.ReLU())
-        conv_layers.append(nn.Conv1d(in_channels=feature_dim/4+2,
+        conv_layers.append(nn.Conv1d(in_channels=feature_dim/4,
                                 out_channels=feature_dim/2,
                                 kernel_size=3, stride=2, padding=1))
         conv_layers.append(nn.ReLU())
-        conv_layers.append(nn.Conv1d(in_channels=feature_dim/2+2,
+        conv_layers.append(nn.Conv1d(in_channels=feature_dim/2,
                                 out_channels=feature_dim,
                                 kernel_size=3, stride=2, padding=1))
         conv_layers.append(nn.ReLU())
         self.conv = nn.Sequential(*conv_layers)
 
         head_layers = []
-        flatten_dim = feature_dim * state_dim / 16
+        dummy = torch.zeros([1,history_length,state_dim-4])
+        dummy = self.conv(dummy)
+        flatten_dim = torch.prod(dummy) + 2 * history_length
         for i in range(num_layers_head):
             head_layers.append(nn.Linear(flatten_dim, flatten_dim, dropout=dropout))
             head_layers.append(nn.ReLU())
         head_layers.append(nn.Linear(flatten_dim, action_dim))
         head_layers.append(nn.Tanh())
         self.head = nn.Sequential(*head_layers)
-
+     
     
-    def forward(self, states):
-        state = state[..., :-2]
-        feature = self.conv(state)
-        return self.head(feature)
+    def forward(self, state):
+        laser = state[..., :-4]
+        pos = state[..., -4:-2]
+        feature = self.conv(laser)
+        feature = torch.reshape(feature, [feature.shape[0],-1])
+        pos = torch.reshape(pos, [pos.shape[0],-1])
+        return self.head(torch.cat([feature, pos], dim=1))
 
 
 class Critic(nn.Module):
@@ -101,22 +108,28 @@ class Critic(nn.Module):
         conv_layers.append(nn.Conv1d(in_channels=feature_dim/2+2,
                                 out_channels=feature_dim,
                                 kernel_size=3, stride=2, padding=1))
-        conv_layers.append(nn.ReLU())
+        conv_layers.append(nn.ReLU)
         self.conv = nn.Sequential(*conv_layers)
 
         head_layers = []
-        flatten_dim = feature_dim * state_dim / 16
+        dummy = torch.zeros([1,history_length,state_dim-4])
+        dummy = self.conv(dummy)
+        flatten_dim = torch.prod(dummy) + 4 * history_length
+        
         for i in range(num_layers_head):
             head_layers.append(nn.Linear(flatten_dim, flatten_dim, dropout=dropout))
             head_layers.append(nn.ReLU())
-        head_layers.append(nn.Linear(flatten_dim, action_dim))
+        head_layers.append(nn.Linear(flatten_dim, 1))
         self.head = nn.Sequential(*head_layers)
 
     
-    def forward(self, states):
-        state = state[..., :-2]
-        feature = self.conv(state)
-        return self.head(feature)
+    def forward(self, state):
+        laser = state[..., :-4]
+        others = state[..., -4:]
+        feature = self.conv(laser)
+        feature = torch.reshape(feature, [feature.shape[0],-1])
+        others = torch.reshape(others, [others.shape[0],-1])
+        return self.head(torch.cat([feature, others], dim=1))
 
 def create_env(config):
     env_config = config["env_config"]
@@ -126,60 +139,76 @@ def create_env(config):
     
     return env
 
-def select_action(model, obs, noise_var):
+def select_action(model, obs, noise):
     act = model(obs)
-    noise = torch.tensor(np.randn(2,) * noise_var)
-    return act + noise
+    noise = torch.tensor(np.randn(2,) * noise)
+    return torch.clip(act + noise, min=-1, max=1).cpu().numpy()
 
 
 def act(
     config,
     actor_index,
-    buffers,
+    buffer_memory,
     ptr,
-    central_actor
+    size,
+    central_actor,
+    device
 ):
 
     try:
+        logging.basicConfig(level='info', format='%(levelname)s %(process)d %(asctime)s %(message)s')
         logging.info("Actor %i started.", actor_index)
-        training_config = config["training_config"]
 
-        log_path = os.path.join(dirname(dirname(abspath(__file__))), 'data')
-        
+        max_steps = config['training_config']['actor_max_steps']
+        update_interval = config['training_config']['actor_update_interval']
+        noise_start = config['training_config']['exploration_noise_start']
+        noise_end = config['training_config']['end']
 
         model = Actor()
         model.load_state_dict(central_actor.state_dict())
 
+        buffer = ReplayBuffer(buffer_memory, ptr, size, config, device)
+
         env = create_env(config)
-        step = iter = 0
+        high = env.action_space.high
+        low = env.action_space.low
+        bias = (high + low) / 2
+        scale = (high - low) / 2
+
+        step = 0
         episode_count = 0
         obs = env.reset()
-        summary = []
+        # summary = []
         episode_return = 0
         episode_length = 0
 
-        while step < training_config['training_args']['actor_steps']:
-            act = select_action(obs)
+        while step < max_steps:
+            noise = noise_start + (noise_end-noise_start)/max_steps*step
+            act = select_action(model, obs, noise)
+            act = act*scale + bias
             obs_new, rew, done, info = env.step(act)
+            buffer.add([obs, act, obs_new, rew, done])
             obs = obs_new
             episode_return += rew
             episode_length += 1
             step += 1
             if done:
                 obs = env.reset()
-                summary.append(dict(
-                    episode_return = episode_return,
-                    episode_length = episode_length,
-                    success = info["success"],
-                    world = info["world"],
-                    collision = info["collision"]
-                ))
+                # summary.append(dict(
+                #     episode_return = episode_return,
+                #     episode_length = episode_length,
+                #     success = info["success"],
+                #     world = info["world"],
+                #     collision = info["collision"]
+                # ))
                 episode_length = 0
                 episode_return = 0
                 episode_count += 1
 
-            if step%training_config['training_args']['update_period'] == 0:
+            if step%update_interval == 0:
                 model.load_state_dict(central_actor.state_dict())
+        
+        logging.info("Actor %i has successfully terminated", actor_index)
 
     except KeyboardInterrupt:
         pass

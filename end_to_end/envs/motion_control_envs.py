@@ -31,10 +31,10 @@ class MotionControlContinuous(JackalGazebo):
             dtype=np.float32
         )
 
-        # if "init_sim" not in kwargs.keys() or kwargs["init_sim"]:
-        self.base_local_planner = "base_local_planner/TrajectoryPlannerROS"
-        self.move_base = self.launch_move_base(goal_position=self.goal_position, base_local_planner=self.base_local_planner)
-        time.sleep(5)
+        # # if "init_sim" not in kwargs.keys() or kwargs["init_sim"]:
+        # self.base_local_planner = "base_local_planner/TrajectoryPlannerROS"
+        # self.move_base = self.launch_move_base(goal_position=self.goal_position, base_local_planner=self.base_local_planner)
+        # time.sleep(5)
         self.gazebo_sim = GazeboSimulation()
 
     def launch_move_base(self, goal_position, base_local_planner):

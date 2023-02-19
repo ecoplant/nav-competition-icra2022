@@ -1,5 +1,4 @@
 env_config:
-  use_condor: True
   env_id: "motion_control_continuous_laser-v0"
   seed: 14
   obs_dim: 724
@@ -27,39 +26,33 @@ env_config:
 
 training_config:
   use_cuda: True
-  algorithm: "TD3"
-  network: "mlp"
-  encoder: "mlp"  # span "mlp", "cnn", "rnn", "transformer"
+  validate: True
+  log_path: "data/log"
+  checkpoint_path: "data/checkpoints"
   buffer_size: 200000
+  gamma: 0.99
+
   num_actor: 16
+  actor_max_steps: 100000
+  actor_update_interval: 1000
+
+  batch_size: 128
+  max_iter: 100000
   actor_lr: 0.00001
   critic_lr: 0.00002
-  num_layers: 1
-  hidden_layer_size: 512
-  encoder_num_layers: 2
-  encoder_hidden_layer_size: 512
+  tau: 0.005
   exploration_noise_start: 0.1
   exploration_noise_end: 0.0999
+
   pre_collect: 4096
-  log_intervals: 2
+  log_interval: 1000
+  checkpoint_interval: 1000
+  actor_optim_interval: 100
   validation: False
   val_interval: 1000000
 
-  dyna_style: False
-  n_simulated_update: 10
-  model_lr: 0.0001
-
-  MPC: False
-  horizon: 10
-  num_particle: 256
-
-  safe_rl: False # for safe RL
-  safe_mode: "lagr" # for safe RL
-  safe_lagr: 2. # for safe RL
 
   policy_args:
-    tau: 0.005
-    gamma: 0.99
     policy_noise: 0.2
     update_actor_freq: 2
     noise_clip: 0.5
@@ -69,7 +62,6 @@ training_config:
     max_step: 100000
     collect_per_step: 4096
     update_per_step: 1024
-    batch_size: 128
     update_period: 1000
 
 condor_config:

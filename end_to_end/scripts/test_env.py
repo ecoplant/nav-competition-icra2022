@@ -59,7 +59,8 @@ def main():
     )
     """
     env = ShapingRewardWrapper(env)
-    env.reset()
+    obs = env.reset()
+    print(obs.shape)
     done  = False
     count = 0
     ep_rew = 0
