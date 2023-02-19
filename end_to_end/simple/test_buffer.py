@@ -4,6 +4,7 @@ from os.path import dirname, abspath
 import os
 import yaml
 import logging
+import time
 
 import numpy as np
 import torch
@@ -69,11 +70,36 @@ def main():
         reward = shared_memory.SharedMemory(
             create=True, size=np.dtype(np.float32).itemsize*buffer_size, name="reward_memory"),
         done = shared_memory.SharedMemory(
-            create=True, size=np.dtype(np.bool8).itemsize*buffer_size, name="done_memory")
+            create=True, size=np.dtype(np.float32).itemsize*buffer_size, name="done_memory")
         )
     ptr = manager.Value('i', 0)
     size = manager.Value('i', 0)
     buffer = ReplayBuffer(buffer_memory, ptr, size, config, device)
+
+    processes = []
+    ctx = multiprocessing.get_context("fork")
+
+    for i in range(2):
+        process = ctx.Process(
+            target=collect,
+            args=(
+                i, buffer_memory, ptr, size, config, device
+            )
+        )
+        process.start()
+        processes.append(process)
+
+    time.sleep(30)
+
+    for i, p in enumerate(processes):
+        p.terminate()
+        p.join()
+        logging.info('process %i has joined',i)
+        
+    for k, i in buffer_memory.items():
+        i.unlink()
+        i.close()
+    
 
 
 if __name__=="__main__":

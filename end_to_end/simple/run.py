@@ -91,7 +91,7 @@ def train(flags, config):
         reward = shared_memory.SharedMemory(
             create=True, size=np.dtype(np.float32).itemsize*buffer_size, name="reward_memory"),
         done = shared_memory.SharedMemory(
-            create=True, size=np.dtype(np.bool8).itemsize*buffer_size, name="done_memory")
+            create=True, size=np.dtype(np.float32).itemsize*buffer_size, name="done_memory")
         )
     ptr = manager.Value('i', 0)
     size = manager.Value('i', 0)
@@ -194,6 +194,14 @@ def train(flags, config):
             },
             checkpoint_path
         )
+    
+    for p in actor_processes:
+        p.terminate()
+        p.join()
+    
+    for k, i in buffer_memory.items():
+        i.unlink()
+        i.close()
 
 def validate(actor, config, logger, iter, num_episodes=10):
     env = create_env(config)
