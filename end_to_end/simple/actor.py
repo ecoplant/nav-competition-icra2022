@@ -148,7 +148,6 @@ def select_action(model, obs, noise):
 def act(
     config,
     actor_index,
-    buffer_memory,
     ptr,
     size,
     central_actor,
@@ -167,7 +166,7 @@ def act(
         model = Actor()
         model.load_state_dict(central_actor.state_dict())
 
-        buffer = ReplayBuffer(buffer_memory, ptr, size, config, device)
+        buffer = ReplayBuffer(ptr, size, config, device)
 
         env = create_env(config)
         high = env.action_space.high
@@ -208,6 +207,8 @@ def act(
             if step%update_interval == 0:
                 model.load_state_dict(central_actor.state_dict())
         
+        for _, i in buffer.buffer_memory.item():
+            i.close()
         logging.info("Actor %i has successfully terminated", actor_index)
 
     except KeyboardInterrupt:

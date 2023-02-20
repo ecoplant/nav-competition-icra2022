@@ -81,7 +81,7 @@ def train(flags, config):
 
     #set a buffer, models and processes
     manager = multiprocessing.Manager()
-    buffer_memory = manager.dict(
+    buffer_memory = dict(
         state = shared_memory.SharedMemory(
             create=True, size=np.dtype(np.float32).itemsize*np.prod(obs_shape)*buffer_size, name="state_memory"),
         action = shared_memory.SharedMemory(
@@ -95,7 +95,7 @@ def train(flags, config):
         )
     ptr = manager.Value('i', 0)
     size = manager.Value('i', 0)
-    buffer = ReplayBuffer(buffer_memory, ptr, size, config, device)
+    buffer = ReplayBuffer(ptr, size, config, device)
 
     actor = Actor().to(device)
     actor_target = copy.deepcopy(actor)
@@ -195,13 +195,14 @@ def train(flags, config):
             checkpoint_path
         )
     
+    #join all actor porcesses and close buffer memory
     for p in actor_processes:
         p.terminate()
         p.join()
     
-    for k, i in buffer_memory.items():
-        i.unlink()
+    for _, i in buffer_memory.items():
         i.close()
+        i.unlink()
 
 def validate(actor, config, logger, iter, num_episodes=10):
     env = create_env(config)

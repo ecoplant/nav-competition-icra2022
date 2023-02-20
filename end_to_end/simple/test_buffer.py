@@ -12,8 +12,8 @@ import torch
 from buffer import ReplayBuffer
 from actor import create_env
 
-def collect(index, buffer_memory, ptr, size, config, device):
-    buffer = ReplayBuffer(buffer_memory, ptr, size, config, device)
+def collect(index, ptr, size, config, device):
+    buffer = ReplayBuffer(ptr, size, config, device)
 
     max_steps = 100
 
@@ -74,7 +74,7 @@ def main():
         )
     ptr = manager.Value('i', 0)
     size = manager.Value('i', 0)
-    buffer = ReplayBuffer(buffer_memory, ptr, size, config, device)
+    buffer = ReplayBuffer(ptr, size, config, device)
 
     processes = []
     ctx = multiprocessing.get_context("fork")
@@ -90,17 +90,18 @@ def main():
         processes.append(process)
 
     time.sleep(30)
+    for i in range(buffer.size):
+        logging.info('%ith state in the buffer: %s',i,str(buffer.buffer_array['state'][i]))
 
     for i, p in enumerate(processes):
         p.terminate()
         p.join()
         logging.info('process %i has joined',i)
-        
+
     for k, i in buffer_memory.items():
         i.unlink()
         i.close()
     
-
 
 if __name__=="__main__":
     main()
