@@ -168,6 +168,9 @@ def act(
 
         buffer = ReplayBuffer(ptr, size, config, device)
 
+        os.environ['ROS_MASTER_URI'] = "http://localhost:"+str(11311+actor_index)
+        os.environ['GAZEBO_MASTER_URI'] = "${GAZEBO_MASTER_URI}:-http://localhost:"+str(11345+actor_index)
+
         env = create_env(config)
         high = env.action_space.high
         low = env.action_space.low

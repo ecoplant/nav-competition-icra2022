@@ -23,16 +23,16 @@ class ReplayBuffer():
         )
 
         self.buffer_array = dict(
-        state = np.ndarray([self.buffer_size,]+self.obs_shape.shape, dtype=np.float32,
-        buffer=self.buffer_memory['state']),
-        action = np.ndarray([self.buffer_size,]+self.act_shape.shape, dtype=np.float32,
-        buffer=self.buffer_memory['action']),
-        next_state = np.ndarray([self.buffer_size,]+self.obs_shape.shape, dtype=np.float32,
-        buffer=self.buffer_memory['next_state']),
-        reward = np.ndarray([self.buffer_size,], dtype=np.float32,
-        buffer=self.buffer_memory['reward']),
-        done = np.ndarray([self.buffer_size,], dtype=np.float32,
-        buffer=self.buffer_memory['done'])
+        state = np.ndarray((self.buffer_size,)+self.obs_shape.shape, dtype=np.float32,
+        buffer=self.buffer_memory['state'].buf),
+        action = np.ndarray((self.buffer_size,)+self.act_shape.shape, dtype=np.float32,
+        buffer=self.buffer_memory['action'].buf),
+        next_state = np.ndarray((self.buffer_size,)+self.obs_shape.shape, dtype=np.float32,
+        buffer=self.buffer_memory['next_state'].buf),
+        reward = np.ndarray((self.buffer_size,), dtype=np.float32,
+        buffer=self.buffer_memory['reward'].buf),
+        done = np.ndarray((self.buffer_size,), dtype=np.float32,
+        buffer=self.buffer_memory['done'].buf)
         )
 
         self.ptr = ptr

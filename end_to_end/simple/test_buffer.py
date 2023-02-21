@@ -17,6 +17,10 @@ def collect(index, ptr, size, config, device):
 
     max_steps = 100
 
+    os.environ['ROS_MASTER_URI'] = "http://localhost:"+str(11311+index)
+    os.environ['GAZEBO_MASTER_URI'] = "${GAZEBO_MASTER_URI}:-http://localhost:"+str(11345+index)
+    print(f"ROS_MASTER_URI={os.environ['ROS_MASTER_URI']} GAZEBO_MASTER_URI={os.environ['GAZEBO_MASTER_URI']}")
+
     env = create_env(config)
     high = env.action_space.high
     low = env.action_space.low
@@ -44,6 +48,8 @@ def collect(index, ptr, size, config, device):
     logging.info("Process %i has successfully terminated", index)
 
 def main():
+    logging.basicConfig(format='%(levelname)s %(process)d %(asctime)s %(message)s',level=logging.INFO)
+
     base_path = dirname(dirname(abspath(__file__)))
     config_path = os.path.join(base_path, 'data/new_config.yaml')
     with open(config_path, 'r') as f:
@@ -88,9 +94,10 @@ def main():
         )
         process.start()
         processes.append(process)
+        time.sleep(5)
 
     time.sleep(30)
-    for i in range(buffer.size):
+    for i in range(buffer.size.value):
         logging.info('%ith state in the buffer: %s',i,str(buffer.buffer_array['state'][i]))
 
     for i, p in enumerate(processes):

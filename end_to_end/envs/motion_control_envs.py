@@ -16,8 +16,9 @@ class MotionControlContinuous(JackalGazebo):
     def __init__(self, min_v=-1, max_v=2, min_w=-3.14, max_w=3.14, **kwargs):
         self.action_dim = 2
         super().__init__(**kwargs)
-        rospy.init_node('e2e', anonymous=True) #, log_level=rospy.FATAL)
-        rospy.set_param('/use_sim_time', True)
+        # the original code causes an error by initializing two nodes('e2e'at here and 'gym'at super().__init__)
+        # rospy.init_node('e2e', anonymous=True) #, log_level=rospy.FATAL)
+        # rospy.set_param('/use_sim_time', True)
 
         self._cmd_vel_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=1)
         
@@ -32,9 +33,9 @@ class MotionControlContinuous(JackalGazebo):
         )
 
         # # if "init_sim" not in kwargs.keys() or kwargs["init_sim"]:
-        # self.base_local_planner = "base_local_planner/TrajectoryPlannerROS"
-        # self.move_base = self.launch_move_base(goal_position=self.goal_position, base_local_planner=self.base_local_planner)
-        # time.sleep(5)
+        self.base_local_planner = "base_local_planner/TrajectoryPlannerROS"
+        self.move_base = self.launch_move_base(goal_position=self.goal_position, base_local_planner=self.base_local_planner)
+        time.sleep(5)
         self.gazebo_sim = GazeboSimulation()
 
     def launch_move_base(self, goal_position, base_local_planner):
@@ -51,8 +52,8 @@ class MotionControlContinuous(JackalGazebo):
         """
         self.step_count = 0
         self.collision_count = 0
-        # Reset robot in odom frame clear_costmap
-        # self.gazebo_sim.reset()
+        
+        self.gazebo_sim.reset()
         self.start_time = self.current_time = rospy.get_time()
         pos, psi = self._get_pos_psi()
         
